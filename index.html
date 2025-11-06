@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>地点マップ（内蔵リスト選択）</title>
+<title>地点マップ（内蔵リスト選択・URL優先）</title>
 
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <style>
@@ -23,7 +23,6 @@
   #map{height:58vh;border-radius:12px;border:1px solid var(--line);margin-top:12px}
   .divider{height:1px; background:var(--line); margin:10px 0}
 
-  /* 下のグループ階層リスト */
   .group-ui{display:grid; gap:8px; margin-top:10px}
   details.group{border:1px solid var(--line); border-radius:10px; background:#fff}
   details.group > summary{list-style:none; cursor:pointer; padding:10px 12px; display:flex; align-items:center; gap:10px; font-weight:700;}
@@ -36,7 +35,6 @@
   .badge{min-width:28px; height:28px; border-radius:8px; display:flex; align-items:center; justify-content:center; font-weight:800; color:#fff}
   .nm{white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width: 560px; }
 
-  /* ピン見た目 */
   .pin-base{width:28px; height:28px; color:#fff; font-weight:800; font-size:14px;
     display:flex; align-items:center; justify-content:center; border:2px solid rgba(255,255,255,.95);
     box-shadow:0 2px 6px rgba(0,0,0,.3); line-height:1; }
@@ -81,11 +79,10 @@
 
 <script>
 /* ====== 設定 ====== */
-/* data/manifest.json に、使いたい xlsx/csv を列挙します（サンプルは下に記載） */
 const MANIFEST_URL = "data/manifest.json";
 
 /* ====== 地図 ====== */
-const map = L.map('map').setView([27.0, 128.4], 11); // 与論あたり（初期）
+const map = L.map('map').setView([27.0, 128.4], 11);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(map);
 let layerGroup = L.layerGroup().addTo(map);
 
@@ -95,27 +92,33 @@ const dsSel=$("#dataset"), btnReload=$("#reload"), btnOpen=$("#openRaw"), groupL
 let manifest=[], rows=[], markers=[], grpColors={};
 function assert(b,msg){ if(!b) throw new Error(msg); }
 
-/* ====== 列 推測 ====== */
+/* ====== 列 推測（見出しの空白・全角空白・大文字小文字を吸収） ====== */
 const NAME=["名称","名前","地点名","名","name","title"];
 const LAT=["緯度","lat","latitude"];
 const LNG=["経度","lng","long","longitude"];
 const DESC=["説明","note","desc","備考説明","説明文","解説"];
 const GRP=["備考","グループ","カテゴリ","区分","分類","班","ブロック","group","category","class"];
-const NUM=["番号","No","num","id","ID"];
+const NUM=["番号","No","no","num","id","ID"];
 const SHP=["形","shape","記号","marker"];
+const URLS=["URL","url","Url","リンク","Google","StreetView","SV","sv_url","sv","streetview"];
 
-function findKey(head, list){
-  const lower=head.map(h=>String(h).toLowerCase());
-  for(const k of list){
-    const i=lower.indexOf(k.toLowerCase());
-    if(i>=0) return head[i];
+function normalizeHeader(s){
+  return String(s).replace(/[\u3000\s]+/g,"").toLowerCase(); // 全角空白も削除 → 小文字
+}
+function findKey(headers, candidates){
+  const norm = headers.map(h=>normalizeHeader(h));
+  for(const cand of candidates){
+    const i = norm.indexOf(normalizeHeader(cand));
+    if(i>=0) return headers[i]; // 元のキー名を返す（値取得に使う）
   }
   return null;
 }
+
+/* ====== 形・数値など ====== */
 function normShape(v){
-  v=(v||"").toString().toLowerCase();
-  if(v.includes("四")||v.includes("□")||v.includes("square")) return "square";
-  if(v.includes("ひ")||v.includes("菱")||v.includes("dia")||v.includes("diamond")) return "diamond";
+  const s=(v??"").toString().toLowerCase();
+  if(s.includes("四")||s.includes("□")||s.includes("square")) return "square";
+  if(s.includes("ひ")||s.includes("菱")||s.includes("dia")||s.includes("diamond")) return "diamond";
   return "circle";
 }
 function parseNum(v){
@@ -147,7 +150,7 @@ async function readArrayBufferToRows(buf){
   return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
 }
 
-/* ====== 描画 ====== */
+/* ====== UI構築 ====== */
 function buildGroupUI(groups, by){
   groupList.innerHTML="";
   groups.forEach((g,i)=>{
@@ -182,17 +185,29 @@ function buildGroupUI(groups, by){
   });
 }
 
-function gmapsUrl(lat,lng){ return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`; }
+/* ====== GoogleマップURL（優先順位） ======
+   1) URL列に値があれば “そのまま” 使う（短縮URL含む・orientation保持）
+   2) それ以外は lat,lng 検索リンク
+*/
+function mapsHrefForRow(r, urlK, lat, lng){
+  if(urlK){
+    const raw = (r[urlK]??"").toString().trim();
+    if(raw) return raw; // 加工せずそのまま
+  }
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+}
 
+/* ====== 描画 ====== */
 function render(){
   if(!rows.length){ alert("データが空です"); return; }
-  const head=Object.keys(rows[0]);
-  const nameK=findKey(head,NAME), latK=findKey(head,LAT), lngK=findKey(head,LNG);
+  const headers = Object.keys(rows[0]);
+
+  const nameK=findKey(headers,NAME), latK=findKey(headers,LAT), lngK=findKey(headers,LNG);
   if(!nameK||!latK||!lngK){
     alert(`必須列が見つかりません。\n名称=${nameK||"×"} / 緯度=${latK||"×"} / 経度=${lngK||"×"}`);
     return;
   }
-  const descK=findKey(head,DESC), grpK=findKey(head,GRP), numK=findKey(head,NUM), shpK=findKey(head,SHP);
+  const descK=findKey(headers,DESC), grpK=findKey(headers,GRP), numK=findKey(headers,NUM), shpK=findKey(headers,SHP), urlK=findKey(headers,URLS);
 
   layerGroup.clearLayers(); markers=[]; grpColors={};
   const by={}, groups=[];
@@ -208,12 +223,12 @@ function render(){
     let label=numK?(r[numK]??"").toString().trim():"";
     if(label==="") label=String(seq++);
     const shp = shpK ? normShape(r[shpK]) : "circle";
-
     const gi = groups.indexOf(grp)>=0 ? groups.indexOf(grp) : (groups.push(grp)-1 + 1);
     const c  = color(grp, gi);
 
+    const href = mapsHrefForRow(r, urlK, lat, lng); // ★ URL列を最優先で使用
     const pop = `<b>${name}</b>${descK?`<br>${(r[descK]??"").toString()}`:""}<br>
-                 <small><a class="gmaps-link" href="${gmapsUrl(lat,lng)}" target="_blank" rel="noopener">グループ: ${grp||"(空白)"} </a></small>`;
+                 <small><a class="gmaps-link" href="${href}" target="_blank" rel="noopener">グループ: ${grp||"(空白)"} </a></small>`;
 
     const m=L.marker([lat,lng],{icon:icon(label,c,shp)}).bindPopup(pop);
     m.addTo(layerGroup);
@@ -221,7 +236,6 @@ function render(){
 
     if(!by[grp]) by[grp]=[];
     by[grp].push({_id:id, _label:label, _name:name});
-
     ms.push(m);
     id++;
   });
@@ -235,28 +249,27 @@ function render(){
   }
 }
 
-/* ====== manifest 読み込み & セレクト構築 ====== */
+/* ====== manifest 読み込み & 選択 ====== */
 async function loadManifest(){
   const res = await fetch(MANIFEST_URL, {cache:"no-store"});
   if(!res.ok){
     dsSel.innerHTML = `<option value="">manifestが見つかりません</option>`;
     throw new Error("manifest.json not found");
   }
-  manifest = await res.json();   // [{id, name, url}]
+  manifest = await res.json();
   if(!Array.isArray(manifest) || !manifest.length) throw new Error("manifestが空です");
-
   dsSel.innerHTML = manifest.map((d,i)=>`<option value="${i}">${d.name}</option>`).join("");
+}
+async function fetchRows(item){
+  const buf = await fetchArrayBuffer(item.url);
+  rows = await readArrayBufferToRows(buf);
 }
 async function loadSelected(){
   const idx = Number(dsSel.value ?? 0);
   const item = manifest[idx];
   if(!item) return;
-
-  // 元データを直接開くボタン
   btnOpen.onclick = ()=> window.open(item.url, "_blank", "noopener");
-
-  const buf = await fetchArrayBuffer(item.url);
-  rows = await readArrayBufferToRows(buf);
+  await fetchRows(item);
   render();
 }
 
