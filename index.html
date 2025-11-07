@@ -8,7 +8,8 @@
 <!-- PWA -->
 <link rel="manifest" href="manifest.webmanifest">
 <meta name="theme-color" content="#ffffff">
-<!-- iOS PWA -->
+
+<!-- iOS（ホーム画面追加→アプリ表示） -->
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="apple-touch-icon" href="icons/icon-192.png">
@@ -76,17 +77,17 @@
 
     <div class="divider"></div>
 
-    <!-- グループ一覧（上） -->
+    <!-- グループ一覧 -->
     <div id="groupList" class="group-ui"></div>
 
     <div class="divider"></div>
 
-    <!-- 地図（下） -->
+    <!-- 地図 -->
     <div id="map"></div>
 
     <div class="divider"></div>
 
-    <!-- 元データボタン（一番下） -->
+    <!-- 元データ -->
     <div style="display:flex;justify-content:flex-end;">
       <button id="openRaw">元データを開く</button>
     </div>
@@ -98,258 +99,100 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <script>
-/* ========== 設定 ========== */
+/* ========= 基本設定 ========= */
 const MANIFEST_URL = "data/manifest.json";
 
-/* ========== 地図初期化 ========== */
-const map = L.map('map').setView([27.0, 128.4], 11);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(map);
+const $=s=>document.querySelector(s);
+const dsSel=$("#dataset"), btnReload=$("#reload"), btnOpen=$("#openRaw");
+
+/* ========= 地図 ========= */
+const map = L.map('map').setView([27.0,128.4],11);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
 let layerGroup = L.layerGroup().addTo(map);
 
-const $=s=>document.querySelector(s);
-const dsSel=$("#dataset"), btnReload=$("#reload"), btnOpen=$("#openRaw"), groupList=$("#groupList");
-
-let manifest=[], rows=[], markers=[], grpColors={};
-function assert(b,msg){ if(!b) throw new Error(msg); }
-
-/* ========== ヘッダ検出（空白/全角/大文字小文字 吸収） ========== */
-const NAME=["名称","名前","地点名","名","name","title"];
-const LAT=["緯度","lat","latitude"];
-const LNG=["経度","lng","long","longitude"];
-const DESC=["説明","note","desc","備考説明","説明文","解説"];
-const GRP=["備考","グループ","カテゴリ","区分","分類","班","ブロック","group","category","class"];
-const NUM=["番号","No","no","num","id","ID"];
-const SHP=["形","shape","記号","marker"];
-const URLS=["URL","url","Url","リンク","Google","StreetView","SV","sv_url","sv","streetview"];
-
-function normalizeHeader(s){
-  return String(s).replace(/[\u3000\s]+/g,"").toLowerCase();
-}
-function findKey(headers, candidates){
-  const norm = headers.map(h=>normalizeHeader(h));
-  for(const cand of candidates){
-    const i = norm.indexOf(normalizeHeader(cand));
-    if(i>=0) return headers[i];
-  }
-  return null;
+/* ========= 重なりズラし ========= */
+function offset(lat,lng,i,total){
+  const ring= Math.floor(i/8)+1;
+  const pos = i%8;
+  const rad = (2*Math.PI/Math.min(8,total))*pos;
+  const r = 6*ring;
+  const dLat=(r*Math.sin(rad))/111320;
+  const dLng=(r*Math.cos(rad))/(111320*Math.cos(lat*Math.PI/180));
+  return {lat:lat+dLat,lng:lng+dLng};
 }
 
-/* ========== 値正規化 ========== */
-function normShape(v){
-  const s=(v??"").toString().toLowerCase();
-  if(s.includes("四")||s.includes("□")||s.includes("square")) return "square";
-  if(s.includes("ひ")||s.includes("菱")||s.includes("dia")||s.includes("diamond")) return "diamond";
-  return "circle";
-}
-function parseNum(v){
-  const n=Number(String(v).replace(/[^\d\.\-]/g,""));
-  return Number.isFinite(n)?n:NaN;
-}
-function color(grp,i){
-  const P=["#e6194b","#3cb44b","#0082c8","#f58231","#911eb4","#46f0f0","#f032e6","#d2f53c","#fabebe","#008080","#e6beff","#aa6e28"];
-  if(grpColors[grp])return grpColors[grp];
-  grpColors[grp]=P[i%P.length]; return grpColors[grp];
-}
-function icon(label,c,s){
-  const html = s==="diamond"
-    ? `<div class="pin-base pin-diamond" style="background:${c}"><span>${label}</span></div>`
-    : s==="square"
-      ? `<div class="pin-base pin-square" style="background:${c}">${label}</div>`
-      : `<div class="pin-base pin-circle" style="background:${c}">${label}</div>`;
-  return L.divIcon({html,className:"",iconSize:[28,28],iconAnchor:[14,14],popupAnchor:[0,-14]});
+/* ========= Googleマップリンク（ストビュー起動しない） ========= */
+function link(lat,lng,name){
+  return `https://www.google.com/maps/search/?api=1&query=${lat},${lng}&source=web`;
 }
 
-/* ========== GoogleマップURL（通常地図へ / ストビュー強制なし） ========== */
-function mapsHrefForRow(r, urlK, lat, lng){
-  const latN = Number(lat), lngN = Number(lng);
-  if (Number.isFinite(latN) && Number.isFinite(lngN)) {
-    return `https://www.google.com/maps/search/?api=1&query=${latN},${lngN}&source=web`;
-  }
-  const name = (r._name ?? "").toString().trim();
-  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}&source=web`;
-}
+/* ========= 描画 ========= */
+async function loadSelected(){
+  const idx=Number(dsSel.value);
+  const item=manifest[idx];
+  if(!item) return;
 
-/* ========== 同一点“微ズラし”配置（重なり解消） ========== */
-function offsetLatLng(lat, lng, idx, total){
-  const ringSize = 8;     // 1リング最大 8 点
-  const stepM = 6;        // リング半径ステップ（m）
-  const ring = Math.floor(idx / ringSize) + 1;
-  const pos  = idx % ringSize;
-  const countThisRing = Math.min(ringSize, total - ringSize*(ring-1));
-  const angle = (2 * Math.PI / countThisRing) * pos;
+  btnOpen.onclick=()=>window.open(item.url,"_blank");
 
-  const radiusM = stepM * ring;
-  const latRad = lat * Math.PI / 180;
-  const dLat = (radiusM * Math.sin(angle)) / 111320;
-  const dLng = (radiusM * Math.cos(angle)) / (111320 * Math.cos(latRad));
-  return { lat: lat + dLat, lng: lng + dLng };
-}
+  const buf=await fetch(item.url,{cache:"no-store"}).then(r=>r.arrayBuffer());
+  const wb=XLSX.read(buf,{type:"array"});
+  const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
 
-/* ========== 描画 ========== */
-function render(){
-  if(!rows.length){ alert("データが空です"); return; }
-  const headers = Object.keys(rows[0]);
+  layerGroup.clearLayers();
 
-  const nameK=findKey(headers,NAME), latK=findKey(headers,LAT), lngK=findKey(headers,LNG);
-  if(!nameK||!latK||!lngK){
-    alert(`必須列が見つかりません。\n名称=${nameK||"×"} / 緯度=${latK||"×"} / 経度=${lngK||"×"}`);
-    return;
-  }
-  const descK=findKey(headers,DESC), grpK=findKey(headers,GRP), numK=findKey(headers,NUM), shpK=findKey(headers,SHP), urlK=findKey(headers,URLS);
-
-  layerGroup.clearLayers(); markers=[]; grpColors={};
-  const by={}, groups=[];
-  let seq=1, id=1;
-  const ms=[];
-
-  // 同一点の件数カウント
-  const dupMap = new Map();
-  const keyOf = (lat,lng)=>`${(+lat).toFixed(6)},${(+lng).toFixed(6)}`;
+  // 重複カウント
+  const mapDup=new Map();
+  function key(a,b){return `${(+a).toFixed(6)},${(+b).toFixed(6)}`;}
   rows.forEach(r=>{
-    const latVal=parseNum(r[latK]), lngVal=parseNum(r[lngK]);
-    const name=(r[nameK]??"").toString().trim();
-    if(!name || !Number.isFinite(latVal) || !Number.isFinite(lngVal)) return;
-    const k=keyOf(latVal,lngVal);
-    const info=dupMap.get(k)||{total:0,next:0};
-    info.total++; dupMap.set(k,info);
+    if(r.緯度 && r.経度){
+      const k=key(r.緯度,r.経度);
+      const o=mapDup.get(k)||{total:0,next:0};
+      o.total++; mapDup.set(k,o);
+    }
   });
 
-  // 実配置
+  const groups={}, markers=[];
   rows.forEach(r=>{
-    const name=(r[nameK]??"").toString().trim();
-    const latVal=parseNum(r[latK]), lngVal=parseNum(r[lngK]);
-    if(!name || !Number.isFinite(latVal) || !Number.isFinite(lngVal)) return;
-
-    const grp=grpK?(r[grpK]??"").toString().trim():"";
-    let label=numK?(r[numK]??"").toString().trim():"";
-    if(label==="") label=String(seq++);
-    const shp = shpK ? normShape(r[shpK]) : "circle";
-    const gi = groups.indexOf(grp)>=0 ? groups.indexOf(grp) : (groups.push(grp)-1 + 1);
-    const c  = color(grp, gi);
-
-    let lat=latVal, lng=lngVal;
-    const k=keyOf(latVal,lngVal); const info=dupMap.get(k);
-    if(info && info.total>1){
-      const p = offsetLatLng(latVal,lngVal, info.next++, info.total);
+    if(!r.名称 || !r.緯度 || !r.経度) return;
+    const k=key(r.緯度,r.経度);
+    const d=mapDup.get(k);
+    let lat=r.緯度, lng=r.経度;
+    if(d.total>1){
+      const p=offset(r.緯度,r.経度,d.next++,d.total);
       lat=p.lat; lng=p.lng;
     }
-
-    const href = mapsHrefForRow({_name:name}, urlK, lat, lng);
-    const pop = `<b>${name}</b>${descK?`<br>${(r[descK]??"").toString()}`:""}<br>
-                 <small><a class="gmaps-link" href="${href}" target="_blank" rel="noopener">Googleマップで開く</a></small><br>
-                 <small>グループ: ${grp||"(空白)"}</small>`;
-
-    const m=L.marker([lat,lng],{icon:icon(label,c,shp)}).bindPopup(pop);
+    const m=L.marker([lat,lng]).bindPopup(
+      `<b>${r.名称}</b><br><a class="gmaps-link" href="${link(lat,lng,r.名称)}" target="_blank">Googleマップで開く</a><br><small>${r.備考||""}</small>`
+    );
     m.addTo(layerGroup);
-    markers.push({id, marker:m, grp});
-
-    if(!by[grp]) by[grp]=[];
-    by[grp].push({_id:id, _label:label, _name:name});
-    ms.push(m);
-    id++;
   });
 
-  if(ms.length){
-    const g=L.featureGroup(ms); map.fitBounds(g.getBounds().pad(0.2));
-    buildGroupUI(Object.keys(by), by);
-  }else{
-    alert("有効行が0件でした（名称/緯度/経度を確認）");
-    groupList.innerHTML="";
-  }
+  // 地図全体表示
+  const all=layerGroup.getLayers();
+  if(all.length) map.fitBounds(L.featureGroup(all).getBounds().pad(0.2));
 }
 
-/* ========== manifest 読み込み & 選択 ========== */
-async function fetchArrayBuffer(url){
-  const res = await fetch(url,{cache:"no-store"});
-  assert(res.ok, `データ取得失敗: ${url}`);
-  return res.arrayBuffer();
-}
-async function readArrayBufferToRows(buf){
-  const wb = XLSX.read(buf,{type:"array"});
-  return XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});
-}
-async function loadManifest(){
-  const res = await fetch(MANIFEST_URL, {cache:"no-store"});
-  if(!res.ok){
-    dsSel.innerHTML = `<option value="">data/manifest.json が見つかりません</option>`;
-    throw new Error("manifest.json not found");
-  }
-  manifest = await res.json();
-  if(!Array.isArray(manifest) || !manifest.length) throw new Error("manifestが空です");
-  dsSel.innerHTML = manifest.map((d,i)=>`<option value="${i}">${d.name}</option>`).join("");
-}
-async function fetchRows(item){
-  const buf = await fetchArrayBuffer(item.url);
-  rows = await readArrayBufferToRows(buf);
-}
-async function loadSelected(){
-  const idx = Number(dsSel.value ?? 0);
-  const item = manifest[idx];
-  if(!item) return;
-  btnOpen.onclick = ()=> window.open(item.url, "_blank", "noopener");
-  await fetchRows(item);
-  render();
-}
-
-/* ========== UI構築（グループ一覧：デフォルト閉） ========== */
-function buildGroupUI(groups, by){
-  groupList.innerHTML="";
-  groups.forEach((g,i)=>{
-    const det=document.createElement("details"); // 閉じた状態が初期
-    det.className="group";
-
-    const sum=document.createElement("summary");
-    const dot=document.createElement("span"); dot.className="dot"; dot.style.background=color(g,i);
-    const lbl=document.createElement("span"); lbl.textContent=g||"(空白)";
-    const cnt=document.createElement("span"); cnt.className="count"; cnt.textContent=by[g].length+" 件";
-    sum.append(dot,lbl,cnt);
-
-    const ul=document.createElement("ul"); ul.className="plist";
-    by[g].forEach(rec=>{
-      const li=document.createElement("li"); li.className="item";
-      li.addEventListener("click",()=>{
-        const mm=markers.find(m=>m.id===rec._id);
-        if(!mm)return;
-        document.getElementById("map").scrollIntoView({behavior:"smooth", block:"start"});
-        map.setView(mm.marker.getLatLng(),15);
-        mm.marker.openPopup();
-      });
-      const badge=document.createElement("span");
-      badge.className="badge"; badge.style.background=color(g,i); badge.textContent=rec._label;
-      const name=document.createElement("span"); name.className="nm"; name.textContent=rec._name;
-      li.append(badge,name);
-      ul.append(li);
-    });
-
-    det.append(sum,ul);
-    groupList.append(det);
-  });
-}
-
-/* ========== イベント ========== */
-const btnReload=document.getElementById('reload');
-const dsSelElm=document.getElementById('dataset');
-btnReload.addEventListener("click", loadSelected);
-dsSelElm.addEventListener("change", loadSelected);
-
-/* ========== 起動 ========== */
-(async ()=>{
-  try{
-    await loadManifest();
-    dsSelElm.value = "0";
-    await loadSelected();
-  }catch(e){
-    console.error(e);
-    alert("初期化に失敗しました。data/manifest.json とデータファイルの配置を確認してください。");
-  }
+/* ========= manifest 読み込み ========= */
+let manifest=[];
+(async()=>{
+  const res=await fetch(MANIFEST_URL,{cache:"no-store"});
+  manifest=await res.json();
+  dsSel.innerHTML=manifest.map((d,i)=>`<option value="${i}">${d.name}</option>`).join("");
+  dsSel.value="0";
+  loadSelected();
 })();
+
+/* ========= イベント ========= */
+btnReload.onclick=loadSelected;
+dsSel.onchange=loadSelected;
 </script>
 
-<!-- PWA SW 登録 -->
+<!-- PWA SW -->
 <script>
-if ("serviceWorker" in navigator) {
+if("serviceWorker" in navigator){
   navigator.serviceWorker.register("service-worker.js");
 }
 </script>
+
 </body>
 </html>
