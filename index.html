@@ -55,7 +55,7 @@
   .gmaps-link:hover{text-decoration:underline;}
 
   /* 画面右上の自己診断バッジ */
-  #diag{position:fixed;right:10px;top:10px;z-index:9999;background:#d32f2f;color:#fff;padding:6px 10px;border-radius:999px;font-size:12px;display:none;max-width:80vw;word-break:break-all}
+  #diag{position:fixed;right:10px;top:10px;z-index:9999;background:#d32f2f;color:#fff;padding:6px 10px;border-radius:999px;font-size:12px;display:none}
 </style>
 </head>
 
@@ -102,23 +102,14 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
 <script>
-/* ===== グローバルエラーを全部つかまえる ===== */
-(function(){
-  const d = ()=>document.getElementById("diag");
-  window.addEventListener("error", e=>{
-    const el=d(); el.textContent="JSエラー: "+e.message; el.style.display="inline-block";
-    console.error(e);
-  });
-  window.addEventListener("unhandledrejection", e=>{
-    const el=d(); el.textContent="Promiseエラー: "+(e.reason && e.reason.message ? e.reason.message : e.reason); el.style.display="inline-block";
-    console.error(e);
-  });
-})();
-
+/* ===== ユーティリティ ===== */
 const $ = s => document.querySelector(s);
 function showDiag(msg){
-  const el=$("#diag"); el.textContent=msg; el.style.display="inline-block";
+  const d=$("#diag"); d.textContent=msg; d.style.display="inline-block";
   console.error(msg);
+}
+function safeRun(fn,msg){
+  try{ fn(); }catch(e){ showDiag((msg?msg+": ":"")+e.message); }
 }
 
 /* ===== 設定 ===== */
@@ -143,6 +134,7 @@ const DESC=["説明","note","desc","備考説明","説明文","解説","remarks"
 const GRP=["備考","グループ","カテゴリ","区分","分類","班","ブロック","group","category","class"];
 const NUM=["番号","No","no","num","id","ID"];
 const SHP=["形","shape","記号","marker"];
+const URLS=["URL","url","Url","リンク","Google","StreetView","SV","sv_url","sv","streetview"];
 
 function normalizeHeader(s){
   return String(s).replace(/[\u3000\s]+/g,"").toLowerCase();
@@ -181,13 +173,24 @@ function icon(label,c,s){
   return L.divIcon({html,className:"",iconSize:[28,28],iconAnchor:[14,14],popupAnchor:[0,-14]});
 }
 
+/* ===== Googleマップ（通常地図） ===== */
+function mapsHrefForRow(r, urlK, lat, lng){
+  const latN = Number(lat), lngN = Number(lng);
+  if (Number.isFinite(latN) && Number.isFinite(lngN)) {
+    return `https://www.google.com/maps/search/?api=1&query=${latN},${lngN}&source=web`;
+  }
+  const name = (r._name ?? "").toString().trim();
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(name)}&source=web`;
+}
+
 /* ===== 重なり解消（6mリング） ===== */
 function offsetLatLng(lat, lng, idx, total){
-  const ringSize = 8, stepM = 6;
+  const ringSize = 8;
+  const stepM = 6;
   const ring = Math.floor(idx / ringSize) + 1;
   const pos  = idx % ringSize;
-  const cnt  = Math.min(ringSize, total - ringSize*(ring-1));
-  const angle = (2 * Math.PI / cnt) * pos;
+  const countThisRing = Math.min(ringSize, total - ringSize*(ring-1));
+  const angle = (2 * Math.PI / countThisRing) * pos;
   const radiusM = stepM * ring;
   const latRad = lat * Math.PI / 180;
   const dLat = (radiusM * Math.sin(angle)) / 111320;
@@ -212,7 +215,7 @@ function buildGroupUI(groups, by){
       li.addEventListener("click",()=>{
         const mm=markers.find(m=>m.id===rec._id);
         if(!mm)return;
-        document.getElementById("map").scrollIntoView({behavior:"smooth", block:"start"});
+        $("#map").scrollIntoView({behavior:"smooth", block:"start"});
         map.setView(mm.marker.getLatLng(),15);
         mm.marker.openPopup();
       });
@@ -229,7 +232,6 @@ function buildGroupUI(groups, by){
 }
 
 /* ===== 描画 ===== */
-let markers=[];
 function render(){
   if(!rows.length){ showDiag("データが空です"); return; }
   const headers = Object.keys(rows[0]||{});
@@ -240,14 +242,15 @@ function render(){
   const lngK =findKey(headers,LNG)  || "経度";
 
   if(!rows[0].hasOwnProperty(nameK) || !rows[0].hasOwnProperty(latK) || !rows[0].hasOwnProperty(lngK)){
-    showDiag(`必須列が見つかりません（名称/緯度/経度）: name=${nameK} lat=${latK} lng=${lngK}`);
+    showDiag(`必須列が見つかりません（名称/緯度/経度）: 見つかったキー name=${nameK} lat=${latK} lng=${lngK}`);
     return;
   }
 
-  const descK=findKey(headers,["説明","note","desc","備考説明","説明文","解説","remarks","memo"]);
+  const descK=findKey(headers,DESC);
   const grpK =findKey(headers,GRP);
   const numK =findKey(headers,NUM);
   const shpK =findKey(headers,SHP);
+  const urlK =findKey(headers,URLS);
 
   layerGroup.clearLayers(); markers=[]; grpColors={};
   const by={}, groups=[];
@@ -279,7 +282,6 @@ function render(){
     const gi = groups.indexOf(grp)>=0 ? groups.indexOf(grp) : (groups.push(grp)-1 + 1);
     const c  = color(grp, gi);
 
-    // 重なり解消
     const k = keyOf(latVal, lngVal);
     const info = dupMap.get(k);
     let lat = latVal, lng = lngVal;
@@ -289,11 +291,11 @@ function render(){
       lat = p.lat; lng = p.lng;
     }
 
-    // ポップアップ（形表示なし、グループ名をGoogle地図リンクに）
-    const href = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}&source=web`;
+    const href = mapsHrefForRow({_name:name}, urlK, lat, lng);
     const desc = descK ? (r[descK]??"").toString() : "";
     const pop = `<b>${name}</b>${desc?`<br>${desc}`:""}<br>
-                 <small>グループ: <a class="gmaps-link" href="${href}" target="_blank" rel="noopener">${grp || "(空白)"}</a></small>`;
+                 <small><a class="gmaps-link" href="${href}" target="_blank" rel="noopener">Googleマップで開く</a></small><br>
+                 <small>グループ: ${grp||"(空白)"}${shp?` / 形: ${shp}`:""}</small>`;
 
     const m=L.marker([lat,lng],{icon:icon(label,c,shp)}).bindPopup(pop);
     m.addTo(layerGroup);
@@ -314,7 +316,7 @@ function render(){
   }
 }
 
-/* ===== データ読込 ===== */
+/* ===== 読み込み ===== */
 async function fetchRows(item){
   const res = await fetch(item.url,{cache:"no-store"});
   if(!res.ok){ showDiag(`データ取得失敗: ${item.url}`); return []; }
@@ -343,8 +345,8 @@ async function loadSelected(){
 }
 
 /* ===== イベント ===== */
-btnReload.addEventListener("click", ()=>loadSelected());
-dsSel.addEventListener("change", ()=>loadSelected());
+btnReload.addEventListener("click", ()=>safeRun(loadSelected,"表示エラー"));
+dsSel.addEventListener("change", ()=>safeRun(loadSelected,"表示エラー"));
 
 /* ===== 起動 ===== */
 (async ()=>{
