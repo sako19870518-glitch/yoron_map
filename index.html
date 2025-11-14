@@ -131,16 +131,15 @@ let manifest=[], rows=[], markers=[], grpColors={};
 
 /* ===== 見出しの検出 ===== */
 const NAME=["名称","名前","地点名","名","name","title"];
-const LAT=["緯度","lat","latitude"];
-const LNG=["経度","lng","long","longitude"];
+const LAT =["緯度","lat","latitude"];
+const LNG =["経度","lng","long","longitude"];
 const DESC=["説明","note","desc","備考説明","説明文","解説","remarks","memo"];
-const GRP=["備考","グループ","カテゴリ","区分","分類","班","ブロック","group","category","class"];
-const NUM=["番号","No","no","num","id","ID"];
-const SHP=["形","shape","記号","marker"];
+const GRP =["備考","グループ","カテゴリ","区分","分類","班","ブロック","group","category","class"];
+const NUM =["番号","No","no","num","id","ID"];
+const SHP =["形","shape","記号","marker"];
 const URLS=["URL","url","Url","リンク","Google","StreetView","SV","sv_url","sv","streetview"];
-const PHT=["写真","画像","写真ファイル","画像ファイル","photo","image","img"];
-/* ★ おんどとり Web Storage / グラフ用 URL 列候補 */
-const GRAPH=["グラフURL","おんどとり","おんどとりWebStorage","WebStorage","graph","graph_url"];
+const PHT =["写真","画像","写真ファイル","画像ファイル","photo","image","img"];
+const GRAPH=["グラフURL","グラフ","graph","chart","温度グラフ","おんどとり","おんどとりweb","おんどとりWebStorage"];
 
 function normalizeHeader(s){
   return String(s).replace(/[\u3000\s]+/g,"").toLowerCase();
@@ -210,78 +209,46 @@ function offsetLatLng(lat, lng, idx, total){
   return { lat: lat + dLat, lng: lng + dLng };
 }
 
-/* ===== グループUI（右側に「グラフを開く」） ===== */
+/* ===== グループUI ===== */
 function buildGroupUI(groups, by){
   groupList.innerHTML="";
   groups.forEach((g,i)=>{
-    const det=document.createElement("details"); 
-    det.className="group";
-
+    const det=document.createElement("details"); det.className="group";
     const sum=document.createElement("summary");
-    const dot=document.createElement("span"); 
-    dot.className="dot"; 
-    dot.style.background=color(g,i);
-    const lbl=document.createElement("span"); 
-    lbl.textContent=g||"(空白)";
-    const cnt=document.createElement("span"); 
-    cnt.className="count"; 
-    cnt.textContent=by[g].length+" 件";
+    const dot=document.createElement("span"); dot.className="dot"; dot.style.background=color(g,i);
+    const lbl=document.createElement("span"); lbl.textContent=g||"(空白)";
+    const cnt=document.createElement("span"); cnt.className="count"; cnt.textContent=by[g].length+" 件";
     sum.append(dot,lbl,cnt);
 
-    const ul=document.createElement("ul"); 
-    ul.className="plist";
-
+    const ul=document.createElement("ul"); ul.className="plist";
     by[g].forEach(rec=>{
-      const li=document.createElement("li"); 
-      li.className="item";
-      li.style.display = "flex";
-      li.style.alignItems = "center";
-      li.style.justifyContent = "space-between";
-
-      // 左側：番号 + 名称（クリックで地図フォーカス）
-      const leftBox = document.createElement("div");
-      leftBox.style.display = "flex";
-      leftBox.style.alignItems = "center";
-      leftBox.style.gap = "10px";
-
-      const badge=document.createElement("span");
-      badge.className="badge"; 
-      badge.style.background=color(g,i); 
-      badge.textContent=rec._label;
-
-      const name=document.createElement("span"); 
-      name.className="nm"; 
-      name.textContent=rec._name;
-
-      leftBox.append(badge,name);
-
-      // 右側：グラフを開く（おんどとり Web Storage 等のURLがある行だけ）
-      const rightBox = document.createElement("div");
-      if (rec._graph) {
-        const link = document.createElement("span");
-        link.textContent = "グラフを開く";
-        link.style.color = "#1976d2";
-        link.style.cursor = "pointer";
-        link.style.fontWeight = "700";
-
-        link.addEventListener("click",(e)=>{
-          e.stopPropagation(); // 行クリックとは独立
-          window.open(rec._graph, "_blank", "noopener");
-        });
-
-        rightBox.append(link);
-      }
-
-      li.append(leftBox, rightBox);
-
-      // 行全体クリックでマップへジャンプ（既存挙動そのまま）
+      const li=document.createElement("li"); li.className="item";
       li.addEventListener("click",()=>{
         const mm=markers.find(m=>m.id===rec._id);
         if(!mm)return;
-        document.getElementById("map").scrollIntoView({behavior:"smooth", block:"start"});
+        $("#map").scrollIntoView({behavior:"smooth", block:"start"});
         map.setView(mm.marker.getLatLng(),15);
         mm.marker.openPopup();
       });
+
+      const badge=document.createElement("span");
+      badge.className="badge"; badge.style.background=color(g,i); badge.textContent=rec._label;
+      const name=document.createElement("span"); name.className="nm"; name.textContent=rec._name;
+
+      li.append(badge,name);
+
+      // ★ ここで「グラフを開く」リンクを追加（URLがあるときだけ）
+      if(rec._graphUrl){
+        const link = document.createElement("a");
+        link.href = rec._graphUrl;
+        link.textContent = "グラフを開く";
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.style.marginLeft = "8px";
+        link.style.fontSize = "12px";
+        link.style.color = "#1976d2";
+        li.append(link);
+      }
 
       ul.append(li);
     });
@@ -312,7 +279,7 @@ function render(){
   const shpK   = findKey(headers,SHP);
   const urlK   = findKey(headers,URLS);
   const photoK = findKey(headers,PHT);
-  const graphK = findKey(headers,GRAPH);  // ★ グラフURL列
+  const graphK = findKey(headers,GRAPH);
 
   layerGroup.clearLayers(); markers=[]; grpColors={};
   const by={}, groups=[];
@@ -356,33 +323,25 @@ function render(){
     const href = mapsHrefForRow({_name:name}, urlK, lat, lng);
     const desc = descK ? (r[descK]??"").toString() : "";
 
-    // 写真リンク（Excelの値をそのまま柔軟に解釈）
+    // 写真リンク
     let photoHtml = "";
     if (photoK) {
       const raw = (r[photoK] ?? "").toString().trim();
       if (raw) {
         let photoUrl = "";
-
         if (/^https?:\/\//i.test(raw)) {
-          // 1) http/https から始まる → そのままURL
           photoUrl = raw;
         } else if (raw.startsWith("/")) {
-          // 2) / から始まる → ドメイン直下パス
           photoUrl = location.origin + raw;
         } else if (raw.includes("/")) {
-          // 3) スラッシュを含む → origin + "/" + 相対パス
           photoUrl = location.origin + "/" + raw;
         } else {
-          // 4) ファイル名だけ → icons/配下のファイルとみなす
           let fname = raw;
           if (!/\.[a-z0-9]+$/i.test(fname)) {
-            // 拡張子なしなら .jpg を付ける
             fname = fname + ".jpg";
           }
-          // "./icons/..." として現在のサイトルート(kanshi/)から相対
           photoUrl = "icons/" + fname;
         }
-
         photoHtml = `
           <br>
           <a href="${photoUrl}" target="_blank" rel="noopener"
@@ -400,9 +359,11 @@ function render(){
     m.addTo(layerGroup);
     markers.push({id, marker:m, grp});
 
-    if(!by[grp]) by[grp]=[];
+    // ★ グラフ用URLをここでセット
     const graphUrl = graphK ? (r[graphK] ?? "").toString().trim() : "";
-    by[grp].push({_id:id, _label:label, _name:name, _graph:graphUrl});
+
+    if(!by[grp]) by[grp]=[];
+    by[grp].push({_id:id, _label:label, _name:name, _graphUrl:graphUrl});
     ms.push(m);
     id++;
   });
